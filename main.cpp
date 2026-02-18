@@ -1,25 +1,30 @@
 /*=======LIBRARIES=======*/
+#define TINY_GSM_MODEM_SIM7600
 #include <Wire.h>
 #include <MPU6050.h>
-#include <HardwareSerial.h>
 #include <TFT_eSPI.h>
+#include <TinyGsmClient.h>
 #include <SPI.h>
 /*=======OBJECTS=======*/
 TFT_eSPI tft=TFT_eSPI();
 MPU6050 mpu;
-HardwareSerial simSerial(2);
 /*=======DEFINITIONS=======*/
 #define MPU_INT_PIN 25
-#define SIM_TX 16
-#define SIM_RX 17
+#define MODEM_RX 16
+#define MODEM_TX 17
+#define SerialAT  Serial1
 #define VIB 23
 #define SIM_PWRKEY 12
 #define MOSI 13
 #define LED_PIN 14
 #define CS 15
 #define BUTTON_PIN 18
+#define SMSPASS "5123"
 /*=======GLOBALVARIABLES=======*/
 int16_t ax,ay,az,gx,gy,gz;
+TinyGsm modem(SerialAT);
+char phone_number[20] = "+639629248120";
+const char* message = "Hello Marcelo";
 /*=======FALL DETECTION STATES=======*/
 enum FallState{NORMAL,FREE_FALL,IMPACT_DETECTED,COUNTDOWN,SMS_SENT};
 FallState fallState=NORMAL;
@@ -33,6 +38,7 @@ const long IMPACT_THRESHOLD=40000;// >2.5g
 const long ONE_G=16384;
 const int IMMOBILE_TIME=1000;// 1 sec
 const int COUNTDOWN_TIME=10000;// 10 sec
+int smsCheckIndex = 1;
 /*=======SIM7600 POWER=======*/
 void powerOnSIM7600G(){
 digitalWrite(SIM_PWRKEY,HIGH);
@@ -40,31 +46,80 @@ delay(1500);
 digitalWrite(SIM_PWRKEY,LOW);
 delay(5000);
 }
+/*=======SMS LISTENER=======*/
+void smsListener() {
+  modem.sendAT(GF("+CMGR="), smsCheckIndex);
+  if (modem.waitResponse(100L, "+CMGR:") == 1) { // Short timeout
+    String response = modem.stream.readStringUntil('\n');
+    String sms = modem.stream.readStringUntil('\n');
+    sms.trim();
+    if (sms.length() > 0) {
+      Serial.print("SMS at index ");
+      Serial.print(smsCheckIndex);
+      Serial.print(": ");
+      Serial.println(sms);
+      if (sms.startsWith("/setnumber ")) {
+        int firstSpace = sms.indexOf(' ');
+        int secondSpace = sms.indexOf(' ', firstSpace + 1);
+        if (secondSpace > firstSpace) {
+          String password = sms.substring(firstSpace + 1, secondSpace);
+          String newNumber = sms.substring(secondSpace + 1);
+          password.trim();
+          newNumber.trim();
+          if (password == SMSPASS && newNumber.length() > 0 && newNumber.length() < sizeof(phone_number)) {
+            newNumber.toCharArray(phone_number, sizeof(phone_number));
+            Serial.print("phone_number updated to: ");
+            Serial.println(phone_number);
+            modem.sendSMS(newNumber.c_str(), "Number updated successfully.");
+          } else {
+            Serial.println("Invalid password or number for /setnumber command.");
+          }
+        } else {
+          Serial.println("Invalid /setnumber command format.");
+        }
+        modem.sendAT(GF("+CMGD="), smsCheckIndex);
+        modem.waitResponse(100L);
+      } else if (sms.startsWith("/test")) {
+        Serial.println("Received /test command. Sending test message...");
+        modem.sendSMS(phone_number, "Test message from device.");
+        modem.sendAT(GF("+CMGD="), smsCheckIndex);
+        modem.waitResponse(100L);
+      }
+    }
+  }
+  smsCheckIndex++;
+  if (smsCheckIndex > 20) smsCheckIndex = 1;
+}
 /*=======SMS FUNCTION=======*/
-void sendSMS(String number,String message){
-Serial.println("Setting SMS text mode...");
-simSerial.println("AT+CMGF=1");
-delay(1000);
-Serial.println("Sending number...");
-simSerial.print("AT+CMGS=\"");
-simSerial.print(number);
-simSerial.println("\"");
-delay(2000);// wait for > prompt
-while(simSerial.available())Serial.write(simSerial.read());
-Serial.println("Sending message content...");
-simSerial.print(message);
-delay(500);
-simSerial.write(26);// CTRL+Z
-delay(5000);
-while(simSerial.available())Serial.write(simSerial.read());
-Serial.println("SMS sent.");
+void sendMessage() {
+  Serial.println("Sending SMS...");
+  if (modem.sendSMS(phone_number, message)) {
+    Serial.println("SMS sent successfully!");
+} else {
+    Serial.println("SMS failed to send");
+}
+}
+
+void callNumber() {
+  Serial.println("Calling number...");
+  if (modem.callNumber(phone_number)) {
+    Serial.println("Call started!");
+    delay(10000); // Call duration (kung gaano katagal ang tawag)
+    modem.callHangup();
+    Serial.println("Call ended.");
+  } else {
+    Serial.println("Call failed to start.");
+  }
 }
 /*=======SETUP=======*/
 void setup(){
 Serial.begin(115200);
-simSerial.begin(9600,SERIAL_8N1,SIM_RX,SIM_TX);
+delay(10);
+SerialAT.begin(115200, SERIAL_8N1, MODEM_RX, MODEM_TX);
+delay(3000);
 pinMode(MOSI,OUTPUT);
 pinMode(VIB, OUTPUT);
+pinMode(BUTTON_PIN, INPUT_PULLUP) ;
 pinMode(LED_PIN,OUTPUT);
 pinMode(CS,INPUT_PULLUP);
 pinMode(SIM_PWRKEY,OUTPUT);
@@ -91,14 +146,18 @@ while(1);
 tft.drawString("MPU OK",10,40);
 /* SIM INIT */
 powerOnSIM7600G();
-simSerial.println("AT");
-delay(1000);
-simSerial.println("AT+CMGF=1");
-delay(1000);
-tft.drawString("SIM OK",10,60);
+Serial.println("Initializing modem...");
+if (!modem.restart()) {
+    Serial.println("Failed to restart modem");
+    tft.drawString("SIM FAILED",10,60);
+    while (true) { delay(1000); }
+} else {
+    tft.drawString("SIM OK",10,60);
+}
 }
 /*=======MAIN LOOP=======*/
 void loop(){
+smsListener();
 mpu.getMotion6(&ax,&ay,&az,&gx,&gy,&gz);
 Serial.print("Accel X: ");Serial.print(ax);
 Serial.print(" Y: ");Serial.print(ay);
@@ -160,7 +219,7 @@ break;
 }
 // Send SMS automatically after 10 seconds
 if(!smsSent&&currentTime-countdownStart>=COUNTDOWN_TIME){
-sendSMS("+639453691069","Alert: Possible fall detected!");
+sendMessage();
 smsSent=true;
 digitalWrite(VIB, HIGH);
 fallState=SMS_SENT;
