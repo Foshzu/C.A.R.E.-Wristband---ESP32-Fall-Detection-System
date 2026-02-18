@@ -39,6 +39,8 @@ const long ONE_G=16384;
 const int IMMOBILE_TIME=1000;// 1 sec
 const int COUNTDOWN_TIME=10000;// 10 sec
 int smsCheckIndex = 1;
+unsigned long lastSmsCheck = 0;
+const unsigned long smsCheckInterval = 10000;
 /*=======SIM7600 POWER=======*/
 void powerOnSIM7600G(){
 digitalWrite(SIM_PWRKEY,HIGH);
@@ -157,7 +159,10 @@ if (!modem.restart()) {
 }
 /*=======MAIN LOOP=======*/
 void loop(){
-smsListener();
+if (millis() - lastSmsCheck > smsCheckInterval) {
+    smsListener();
+    lastSmsCheck = millis();
+  }
 mpu.getMotion6(&ax,&ay,&az,&gx,&gy,&gz);
 Serial.print("Accel X: ");Serial.print(ax);
 Serial.print(" Y: ");Serial.print(ay);
